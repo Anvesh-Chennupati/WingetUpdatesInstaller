@@ -1,8 +1,14 @@
 import gradio as gr
 import logging
-from typing import Dict, List, Tuple
-from wingetupdatesinstaller.utils import get_system_info, check_winget, get_installed_packages, check_updates
-from wingetupdatesinstaller.utils.package_manager import get_all_packages
+from typing import Dict, List, Tuple, Any
+from wingetupdatesinstaller.utils import get_system_info, check_winget
+from wingetupdatesinstaller.lib.winget import (
+    list_packages,
+    check_updates,
+    install_updates,
+    PackageUpdate,
+    WingetError
+)
 
 # Configure logging
 logging.basicConfig(
@@ -10,6 +16,43 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def update_package_tables():
+    """Get and display installed packages."""
+    logger.info("Starting package table update")
+    try:
+        packages = list_packages()
+        logger.debug(f"Retrieved {len(packages)} packages")
+        
+        # Format packages for display
+        winget_data = []
+        non_winget_data = []
+        
+        for pkg in packages:
+            try:
+                entry = [
+                    pkg.name,
+                    pkg.id,
+                    pkg.version,
+                    pkg.source or "winget"
+                ]
+                
+                # Add to appropriate list based on source
+                if pkg.source and pkg.source.lower() != "winget":
+                    non_winget_data.append(entry)
+                    logger.debug(f"Added non-winget package: {entry}")
+                else:
+                    winget_data.append(entry)
+                    logger.debug(f"Added winget package: {entry}")
+                    
+            except Exception as e:
+                logger.error(f"Error formatting package {pkg}: {e}")
+                
+        return winget_data, non_winget_data
+    except Exception as e:
+        logger.error(f"Error updating package tables: {e}")
+        gr.Error("An unexpected error occurred while updating package tables")
+        return [], []
 
 def create_app():
     """Create the Gradio application with sidebar navigation."""
@@ -72,10 +115,18 @@ def create_app():
                         type="array"  # Explicitly set type to array
                     )
                     
+                    # Status for updates
+                    update_status = gr.Text(
+                        label="Update Status",
+                        show_label=True,
+                        visible=False
+                    )
+
                     # Updates Section
                     gr.Markdown("### Available Updates")
                     with gr.Row():
                         check_updates_button = gr.Button("🔄 Check for Updates", variant="primary")
+                        apply_updates_button = gr.Button("✨ Apply Selected Updates", variant="secondary", visible=False)
                     
                     # Regular updates section
                     gr.Markdown("#### Standard Updates")
@@ -105,6 +156,84 @@ def create_app():
                         label="Unknown Version Updates",
                         type="array"
                     )
+                    
+                    # Define event handlers within create_app scope
+                    def handle_check_updates():
+                        """Handler for check updates button click."""
+                        try:
+                            regular, explicit, unknown = check_updates()
+                            
+                            # Format each type of update for display
+                            regular_data = format_updates_for_display(regular)
+                            explicit_data = format_updates_for_display(explicit)
+                            unknown_data = format_updates_for_display(unknown)
+                            
+                            logger.info(f"Found {len(regular)} regular, {len(explicit)} explicit, and {len(unknown)} unknown version updates")
+                            
+                            # Show apply updates button if there are updates
+                            if regular_data or explicit_data or unknown_data:
+                                return regular_data, explicit_data, unknown_data, {"visible": True}, {"visible": True, "value": "Ready to install updates"}
+                            else:
+                                return [], [], [], {"visible": False}, {"visible": True, "value": "No updates available"}
+                            
+                        except WingetError as e:
+                            gr.Warning(str(e))
+                            return [], [], [], {"visible": False}, {"visible": True, "value": str(e)}
+                        except Exception as e:
+                            logger.error(f"Error checking for updates: {e}")
+                            gr.Error("An unexpected error occurred while checking for updates")
+                            return [], [], [], {"visible": False}, {"visible": True, "value": f"Error: {str(e)}"}
+
+                    def handle_apply_updates(regular_data: List[List], explicit_data: List[List], unknown_data: List[List]) -> str:
+                        """Apply selected updates from all tables."""
+                        try:
+                            updates_to_install = []
+                            
+                            # Collect selected updates from each table
+                            for row in regular_data:
+                                if row[5]:  # If selected
+                                    updates_to_install.append(create_package_from_row(row))
+                                    
+                            for row in explicit_data:
+                                if row[5]:  # If selected
+                                    updates_to_install.append(create_package_from_row(row, is_explicit=True))
+                                    
+                            for row in unknown_data:
+                                if row[5]:  # If selected
+                                    updates_to_install.append(create_package_from_row(row, is_unknown=True))
+                            
+                            if not updates_to_install:
+                                return "No updates selected for installation"
+                                
+                            # Install updates
+                            logger.info(f"Installing {len(updates_to_install)} updates...")
+                            install_updates(updates_to_install)
+                            
+                            return f"Successfully installed {len(updates_to_install)} updates"
+                            
+                        except WingetError as e:
+                            gr.Warning(str(e))
+                            return f"Error installing updates: {str(e)}"
+                        except Exception as e:
+                            logger.error(f"Error applying updates: {e}")
+                            gr.Error("An unexpected error occurred while installing updates")
+                            return f"Error installing updates: {str(e)}"
+
+                    # Connect button events after defining handlers
+                    check_updates_button.click(
+                        fn=handle_check_updates,
+                        outputs=[regular_updates_table, explicit_updates_table, unknown_updates_table, apply_updates_button, update_status],
+                        api_name="check_updates"
+                    )
+                    
+                    # Connect apply updates button click event
+                    apply_updates_button.click(
+                        fn=handle_apply_updates,
+                        inputs=[regular_updates_table, explicit_updates_table, unknown_updates_table],
+                        outputs=[update_status],
+                        api_name="apply_updates"
+                    )
+
         
         # Event handlers for navigation
         def set_tab(tab_name):
@@ -135,44 +264,37 @@ def create_app():
         )
         
         def update_package_tables():
-            """Get and display both available and unavailable packages."""
+            """Get and display installed packages."""
             logger.info("Starting package table update")
-            winget_pkgs, non_winget_pkgs = get_all_packages()
-            logger.debug(f"Retrieved {len(winget_pkgs)} winget packages and {len(non_winget_pkgs)} non-winget packages")
-            
             try:
+                packages = list_packages()
+                logger.debug(f"Retrieved {len(packages)} packages")
+                
                 # Format packages for display
                 winget_data = []
-                for pkg in winget_pkgs:
-                    try:
-                        entry = [
-                            str(pkg.get("Name", "")),
-                            str(pkg.get("ID", "")),
-                            str(pkg.get("Version", "")),
-                            "winget"
-                        ]
-                        winget_data.append(entry)
-                        logger.debug(f"Added winget package: {entry}")
-                    except Exception as e:
-                        logger.error(f"Error formatting winget package {pkg}: {e}")
-                
                 non_winget_data = []
-                for pkg in non_winget_pkgs:
+                
+                for pkg in packages:
                     try:
                         entry = [
-                            str(pkg.get("Name", "")),
-                            str(pkg.get("ID", "")),
-                            str(pkg.get("Version", "")),
-                            str(pkg.get("Source", "System"))
+                            pkg.name,
+                            pkg.id,
+                            pkg.version,
+                            pkg.source or "winget"
                         ]
-                        non_winget_data.append(entry)
-                        logger.debug(f"Added non-winget package: {entry}")
+                        
+                        # Add to appropriate list based on source
+                        if pkg.source and pkg.source.lower() != "winget":
+                            non_winget_data.append(entry)
+                            logger.debug(f"Added non-winget package: {entry}")
+                        else:
+                            winget_data.append(entry)
+                            logger.debug(f"Added winget package: {entry}")
+                            
                     except Exception as e:
-                        logger.error(f"Error formatting non-winget package {pkg}: {e}")
+                        logger.error(f"Error formatting package {pkg}: {e}")
                 
                 logger.debug(f"Final data sizes - Winget: {len(winget_data)}, Non-winget: {len(non_winget_data)}")
-                logger.debug(f"Sample winget entry: {winget_data[0] if winget_data else []}")
-                logger.debug(f"Sample non-winget entry: {non_winget_data[0] if non_winget_data else []}")
                 
                 return winget_data, non_winget_data
             except Exception as e:
@@ -185,23 +307,35 @@ def create_app():
             api_name="list_packages"
         )
         
-        def format_updates_for_display(updates: List[Dict]) -> List[List]:
+        def format_updates_for_display(updates: List[PackageUpdate]) -> List[List]:
             """Format package updates for display in tables."""
             formatted = []
             for pkg in updates:
                 try:
                     entry = [
-                        str(pkg.get("Name", "")),
-                        str(pkg.get("ID", "")),
-                        str(pkg.get("Version", "")),
-                        str(pkg.get("Available", "")),
-                        str(pkg.get("Source", "winget")),
-                        bool(pkg.get("Update", True))
+                        pkg.name,
+                        pkg.id,
+                        pkg.version,
+                        pkg.available_version,
+                        pkg.source or "winget",
+                        True  # Default to selected for update
                     ]
                     formatted.append(entry)
                 except Exception as e:
                     logger.error(f"Error formatting update {pkg}: {e}")
             return formatted
+
+        def create_package_from_row(row: List[Any], is_explicit: bool = False, is_unknown: bool = False) -> PackageUpdate:
+            """Create a PackageUpdate object from a table row."""
+            return PackageUpdate(
+                name=str(row[0]),
+                id=str(row[1]),
+                version=str(row[2]),
+                available_version=str(row[3]),
+                source=str(row[4]),
+                is_unknown_version=is_unknown,
+                requires_explicit_upgrade=is_explicit
+            )
 
         def handle_check_updates():
             """Handler for check updates button click."""
@@ -215,15 +349,82 @@ def create_app():
                 
                 logger.info(f"Found {len(regular)} regular, {len(explicit)} explicit, and {len(unknown)} unknown version updates")
                 
-                return regular_data, explicit_data, unknown_data
+                # Show apply updates button if there are updates
+                if regular_data or explicit_data or unknown_data:
+                    apply_updates_button.visible = True
+                else:
+                    apply_updates_button.visible = False
+                
+                update_status.visible = True
+                update_status.value = "Found updates. Select packages to update and click 'Apply Selected Updates'."
+                # Use dictionary for component updates in Gradio 3.x
+                return regular_data, explicit_data, unknown_data, {"visible": True}, {"visible": True, "value": "Ready to install updates"}
+                
+            except WingetError as e:
+                gr.Warning(str(e))
+                return [], [], [], {"visible": False}, {"visible": True, "value": str(e)}
             except Exception as e:
                 logger.error(f"Error checking for updates: {e}")
-                return [], [], []
+                gr.Error("An unexpected error occurred while checking for updates")
+                return [], [], [], {"visible": False}, {"visible": True, "value": f"Error: {str(e)}"}
+                
+        def handle_apply_updates(regular_data: List[List], explicit_data: List[List], unknown_data: List[List]) -> str:
+            """Apply selected updates from all tables."""
+            try:
+                updates_to_install = []
+                
+                # Collect selected updates from each table
+                for row in regular_data:
+                    if row[5]:  # If selected
+                        updates_to_install.append(create_package_from_row(row))
+                        
+                for row in explicit_data:
+                    if row[5]:  # If selected
+                        updates_to_install.append(create_package_from_row(row, is_explicit=True))
+                        
+                for row in unknown_data:
+                    if row[5]:  # If selected
+                        updates_to_install.append(create_package_from_row(row, is_unknown=True))
+                
+                if not updates_to_install:
+                    return "No updates selected for installation"
+                    
+                # Install updates
+                logger.info(f"Installing {len(updates_to_install)} updates...")
+                install_updates(updates_to_install)
+                
+                return f"Successfully installed {len(updates_to_install)} updates"
+                
+            except WingetError as e:
+                gr.Warning(str(e))
+                return f"Error installing updates: {str(e)}"
+            except Exception as e:
+                logger.error(f"Error applying updates: {e}")
+                gr.Error("An unexpected error occurred while installing updates")
+                return f"Error installing updates: {str(e)}"
         
         check_updates_button.click(
             fn=handle_check_updates,
-            outputs=[regular_updates_table, explicit_updates_table, unknown_updates_table],
+            outputs=[
+                regular_updates_table,
+                explicit_updates_table,
+                unknown_updates_table,
+                apply_updates_button,
+                update_status
+            ],
             api_name="check_updates"
+        )
+        
+        # Connect apply updates button
+        apply_updates_button.click(
+            fn=handle_apply_updates,
+            inputs=[
+                regular_updates_table,
+                explicit_updates_table,
+                unknown_updates_table
+            ],
+            outputs=[update_status],
+            api_name="apply_updates"
         )
     
     return app
