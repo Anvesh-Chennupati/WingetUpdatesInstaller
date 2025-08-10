@@ -1,5 +1,6 @@
 import gradio as gr
 import logging
+from typing import Dict, List, Tuple
 from wingetupdatesinstaller.utils import get_system_info, check_winget, get_installed_packages, check_updates
 from wingetupdatesinstaller.utils.package_manager import get_all_packages
 
@@ -75,11 +76,35 @@ def create_app():
                     gr.Markdown("### Available Updates")
                     with gr.Row():
                         check_updates_button = gr.Button("🔄 Check for Updates", variant="primary")
-                        updates_table = gr.Dataframe(
-                            headers=["Name", "ID", "Current Version", "Available Version", "Update"],
-                            datatype=["str", "str", "str", "str", "bool"],
-                            label="Available Updates"
-                        )
+                    
+                    # Regular updates section
+                    gr.Markdown("#### Standard Updates")
+                    regular_updates_table = gr.DataFrame(
+                        headers=["Name", "ID", "Current Version", "Available Version", "Source", "Update"],
+                        datatype=["str", "str", "str", "str", "str", "bool"],
+                        label="Regular Updates",
+                        type="array"
+                    )
+                    
+                    # Explicit updates section
+                    gr.Markdown("#### Updates Requiring Explicit Targeting")
+                    gr.Text("These packages require manual confirmation using the --id flag during update", show_label=False)
+                    explicit_updates_table = gr.DataFrame(
+                        headers=["Name", "ID", "Current Version", "Available Version", "Source", "Update"],
+                        datatype=["str", "str", "str", "str", "str", "bool"],
+                        label="Explicit Updates",
+                        type="array"
+                    )
+                    
+                    # Unknown version updates section
+                    gr.Markdown("#### Updates with Unknown Versions")
+                    gr.Text("These packages have versions that cannot be determined automatically", show_label=False)
+                    unknown_updates_table = gr.DataFrame(
+                        headers=["Name", "ID", "Current Version", "Available Version", "Source", "Update"],
+                        datatype=["str", "str", "str", "str", "str", "bool"],
+                        label="Unknown Version Updates",
+                        type="array"
+                    )
         
         # Event handlers for navigation
         def set_tab(tab_name):
@@ -160,9 +185,44 @@ def create_app():
             api_name="list_packages"
         )
         
+        def format_updates_for_display(updates: List[Dict]) -> List[List]:
+            """Format package updates for display in tables."""
+            formatted = []
+            for pkg in updates:
+                try:
+                    entry = [
+                        str(pkg.get("Name", "")),
+                        str(pkg.get("ID", "")),
+                        str(pkg.get("Version", "")),
+                        str(pkg.get("Available", "")),
+                        str(pkg.get("Source", "winget")),
+                        bool(pkg.get("Update", True))
+                    ]
+                    formatted.append(entry)
+                except Exception as e:
+                    logger.error(f"Error formatting update {pkg}: {e}")
+            return formatted
+
+        def handle_check_updates():
+            """Handler for check updates button click."""
+            try:
+                regular, explicit, unknown = check_updates()
+                
+                # Format each type of update for display
+                regular_data = format_updates_for_display(regular)
+                explicit_data = format_updates_for_display(explicit)
+                unknown_data = format_updates_for_display(unknown)
+                
+                logger.info(f"Found {len(regular)} regular, {len(explicit)} explicit, and {len(unknown)} unknown version updates")
+                
+                return regular_data, explicit_data, unknown_data
+            except Exception as e:
+                logger.error(f"Error checking for updates: {e}")
+                return [], [], []
+        
         check_updates_button.click(
-            fn=check_updates,
-            outputs=updates_table,
+            fn=handle_check_updates,
+            outputs=[regular_updates_table, explicit_updates_table, unknown_updates_table],
             api_name="check_updates"
         )
     
