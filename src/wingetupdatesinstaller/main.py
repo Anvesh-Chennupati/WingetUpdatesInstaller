@@ -202,103 +202,99 @@ def create_app():
                             ]
 
                     def handle_apply_updates(regular_data: List[List], explicit_data: List[List], unknown_data: List[List]) -> Dict:
-                        """Apply selected updates from all tables with real-time output."""
+                        """Apply selected updates with clean, real-time output."""
                         try:
                             updates_to_install = []
                             
-                            # Collect selected updates from each table
+                            # Collect selected updates
                             for row in regular_data:
-                                if row[5]:  # If selected (6th column is the checkbox)
-                                    updates_to_install.append(create_package_from_row(row))
-                                    
+                                if row[5]: updates_to_install.append(create_package_from_row(row))
                             for row in explicit_data:
-                                if row[5]:  # If selected
-                                    updates_to_install.append(create_package_from_row(row, is_explicit=True))
-                                    
+                                if row[5]: updates_to_install.append(create_package_from_row(row, is_explicit=True))
                             for row in unknown_data:
-                                if row[5]:  # If selected
-                                    updates_to_install.append(create_package_from_row(row, is_unknown=True))
+                                if row[5]: updates_to_install.append(create_package_from_row(row, is_unknown=True))
                             
                             if not updates_to_install:
-                                return gr.update(value="No updates selected for installation", visible=True)
+                                return gr.update(value="No updates selected", visible=True)
                                 
-                            # Create a progress output string
-                            output_lines = []
-                            output_lines.append(f"Starting installation of {len(updates_to_install)} updates...\n")
+                            output_lines = [f"Starting installation of {len(updates_to_install)} updates...\n"]
+                            yield gr.update(value="\n".join(output_lines), visible=True)
                             
                             success_count = 0
                             failed_packages = []
                             
                             for pkg in updates_to_install:
                                 try:
-                                    # Build command for this package
+                                    # Build command
                                     cmd = ["winget", "upgrade", "--id", pkg.id]
                                     if not pkg.is_unknown_version and pkg.available_version:
                                         cmd.extend(["--version", pkg.available_version])
                                     
-                                    output_lines.append(f"\n🔄 Installing {pkg.name} ({pkg.id})...")
+                                    output_lines.append(f"\n🔄 Installing {pkg.name}...")
                                     yield gr.update(value="\n".join(output_lines), visible=True)
                                     
-                                    logger.info(f"Running update command: {' '.join(cmd)}")
-                                    
-                                    # Run the command with real-time output
                                     process = subprocess.Popen(
                                         cmd,
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE,
                                         text=True,
                                         encoding='utf-8',
-                                        bufsize=1,  # Line buffered
-                                        universal_newlines=True
+                                        bufsize=1
                                     )
                                     
-                                    # Read output in real-time
+                                    # Process output with cleaner formatting
+                                    last_progress = ""
                                     while True:
                                         output = process.stdout.readline()
                                         if output == '' and process.poll() is not None:
                                             break
                                         if output:
-                                            output_lines.append(output.strip())
+                                            # Clean up spinner animations and progress bars
+                                            clean_line = output.strip()
+                                            if any(c in clean_line for c in ["-", "\\", "|", "/", "▒", "█"]):
+                                                if "MB /" in clean_line:  # Keep progress bars
+                                                    if clean_line != last_progress:
+                                                        output_lines[-1] = clean_line
+                                                        last_progress = clean_line
+                                                        yield gr.update(value="\n".join(output_lines), visible=True)
+                                                continue
+                                            if not clean_line or clean_line.startswith("Found") or "Microsoft is not responsible" in clean_line:
+                                                continue
+                                            output_lines.append(clean_line)
                                             yield gr.update(value="\n".join(output_lines), visible=True)
                                     
                                     # Check result
-                                    return_code = process.poll()
-                                    if return_code == 0:
+                                    if process.poll() == 0:
                                         success_count += 1
-                                        output_lines.append(f"✅ Successfully installed {pkg.name}")
-                                        logger.info(f"Successfully updated {pkg.name}")
+                                        output_lines.append(f"✅ Successfully installed {pkg.name}\n")
                                     else:
-                                        error_output = process.stderr.read()
-                                        output_lines.append(f"❌ Failed to install {pkg.name}: {error_output.strip()}")
-                                        logger.error(f"Error updating {pkg.name}: {error_output}")
-                                        failed_packages.append(f"{pkg.name} ({error_output.strip()})")
+                                        error_msg = process.stderr.read().strip() or "Unknown error"
+                                        output_lines.append(f"❌ Failed to install {pkg.name}: {error_msg}\n")
+                                        failed_packages.append(pkg.name)
                                     
                                     yield gr.update(value="\n".join(output_lines), visible=True)
                                     
                                 except Exception as e:
                                     error_msg = str(e)
-                                    output_lines.append(f"❌ Unexpected error installing {pkg.name}: {error_msg}")
-                                    logger.error(f"Unexpected error updating {pkg.name}: {error_msg}")
-                                    failed_packages.append(f"{pkg.name} ({error_msg})")
+                                    output_lines.append(f"❌ Error installing {pkg.name}: {error_msg}\n")
+                                    failed_packages.append(pkg.name)
                                     yield gr.update(value="\n".join(output_lines), visible=True)
                             
                             # Final summary
                             if success_count == len(updates_to_install):
-                                output_lines.append(f"\n🎉 Successfully installed all {success_count} updates!")
+                                output_lines.append(f"\n🎉 All {success_count} updates installed successfully!")
                             elif success_count > 0:
                                 output_lines.append(f"\n⚠️ Completed with {success_count} successes and {len(failed_packages)} failures")
-                                output_lines.append("Failed packages: " + ", ".join(failed_packages))
                             else:
-                                output_lines.append(f"\n❌ Failed to install all updates")
-                                output_lines.append("Errors: " + ", ".join(failed_packages))
+                                output_lines.append("\n❌ All updates failed")
+                            
+                            if failed_packages:
+                                output_lines.append("\nFailed packages: " + ", ".join(failed_packages))
                             
                             return gr.update(value="\n".join(output_lines), visible=True)
                             
                         except Exception as e:
-                            error_msg = f"❌ Critical error during update process: {str(e)}"
-                            logger.error(error_msg)
-                            return gr.update(value=error_msg, visible=True)
-
+                            return gr.update(value=f"❌ Critical error: {str(e)}", visible=True)
                     # Connect button events
                     check_updates_button.click(
                         fn=handle_check_updates,
